@@ -110,10 +110,7 @@ def home():
             <input type="text" id="provider_id" placeholder="e.g. 6053290">
             
             <label for="radius">Maximum Distance (miles)</label>
-            <input type="number" id="radius" placeholder="e.g. 25" value="25" min="1" max="200" step="0.1">
-            
-            <label for="limit">Number of Recommendations</label>
-            <input type="number" id="limit" placeholder="e.g. 10" value="10" min="1" max="100">
+            <input type="number" id="radius" placeholder="e.g. 25" value="25" min="1" max="2000" step="0.1">
             
             <button onclick="getRecommendations()">Get Recommendations</button>
 
@@ -124,7 +121,6 @@ def home():
             async function getRecommendations() {
                 const providerId = document.getElementById("provider_id").value.trim();
                 const radius = document.getElementById("radius").value.trim() || 25;
-                const limit = document.getElementById("limit").value.trim() || 10;
                 const resultDiv = document.getElementById("result");
 
                 if (!providerId) {
@@ -143,7 +139,7 @@ def home():
                 resultDiv.innerHTML = "<div class='loading'><div class='spinner'></div><p>Fetching recommendations within radius...</p></div>";
 
                 try {
-                    const response = await fetch(`/recommend/${providerId}?radius=${radius}&limit=${limit}`);
+                    const response = await fetch(`/recommendations/${providerId}?radius=${radius}`);
                     let data;
                     const contentType = response.headers.get("content-type");
                     if (contentType && contentType.includes("application/json")) {
@@ -170,13 +166,13 @@ def home():
 
 
 @app.get("/test/{provider_id}")
-async def test_recommendations(provider_id: str, radius: float = 50.0, limit: int = 5):
+async def test_recommendations(provider_id: str, radius: float = 50.0):
     """
     Test endpoint to validate priority rules implementation with radius filtering
     """
     try:
-        print(f"Test endpoint called with provider_id: {provider_id}, radius: {radius}, limit: {limit}")
-        result = recommend_patients(provider_id, radius=radius, top_k=limit)
+        print(f"Test endpoint called with provider_id: {provider_id}, radius: {radius}")
+        result = recommend_patients(provider_id, radius=radius, top_k=1000)  # Get all matches for testing
         print(f"Recommend_patients returned: {type(result)}")
         
         if isinstance(result, dict) and "error" in result:
@@ -228,18 +224,17 @@ async def test_recommendations(provider_id: str, radius: float = 50.0, limit: in
 
 @app.get("/recommend/{provider_id}")
 @app.get("/recommendations/{provider_id}")
-async def get_recommendations(provider_id: str, radius: float = 50.0, limit: int = 50):
+async def get_recommendations(provider_id: str, radius: float = 50.0):
     """
     Get patient recommendations for a clinician within a specified radius
     
     Args:
         provider_id: The FOX_PROVIDER_ID of the clinician to recommend patients for
         radius: Maximum distance in miles to include patients (default: 50.0)
-        limit: The maximum number of patients to recommend (default: 50)
     """
     try:
-        print(f"Recommendation endpoint called with provider_id: {provider_id}, radius: {radius}, limit: {limit}")
-        result = recommend_patients(provider_id, radius=radius, top_k=limit)
+        print(f"Recommendation endpoint called with provider_id: {provider_id}, radius: {radius}")
+        result = recommend_patients(provider_id, radius=radius, top_k=1000)  # Use high default to get all matches
         print(f"Recommend_patients completed successfully")
         
         if isinstance(result, dict) and "error" in result:
@@ -258,3 +253,11 @@ async def get_recommendations(provider_id: str, radius: float = 50.0, limit: int
             status_code=500,
             content={"detail": f"Internal server error: {str(e)}", "traceback": error_details}
         )
+
+if __name__ == "__main__":
+    import uvicorn
+    print("🚀 Starting AI Patient Recommendation Server...")
+    print("📍 Server will be available at: http://localhost:8006")
+    print("🔧 Press Ctrl+C to stop the server")
+    print()
+    uvicorn.run(app, host="0.0.0.0", port=8006)

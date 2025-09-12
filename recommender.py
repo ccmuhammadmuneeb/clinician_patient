@@ -43,11 +43,14 @@ except Exception:
     GEMINI_IMPORT_OK = False
 
 # ====================== CONFIG ======================
-# Service account file for Google API authentication
+# Gemini API Key - Replace with your actual API key
+GOOGLE_API_KEY = "AIzaSyC09ZGXx4qI5FnSVg5N0Nf0rmXmrtC-LOc"
+
+# Service account file for Google API authentication (fallback)
 SERVICE_ACCOUNT_FILE = os.path.abspath(r"C:\Users\MUHAMMADMUNEEB3\v2\aiml-365220-99e7125f22cc.json")
 # Gemini model configuration
 GEMINI_MODEL = os.environ.get("GEMINI_MODEL", "gemini-2.0-flash")
-AI_MAX_OUTPUT_TOKENS = 1600
+AI_MAX_OUTPUT_TOKENS = 8000  # Increased from 1600 to handle 30+ patients (each ~150 tokens)
 AI_TEMPERATURE = 0.1
 
 # API Configuration
@@ -245,47 +248,50 @@ def init_gemini() -> bool:
     """Initialize Gemini SDK only when needed."""
     global _gemini_initialized, genai, GEMINI_IMPORT_OK
     
-    print("init_gemini called...")
+    print("🔧 Initializing Gemini AI...")
     
     if _gemini_initialized:
-        print("Gemini already initialized, returning True")
+        print("✅ Gemini already initialized")
         return True
         
     if not GEMINI_IMPORT_OK:
-        print("Gemini import failed - the google.generativeai package may not be installed.")
+        print("❌ Gemini import failed - google.generativeai package not installed")
         return False
         
     try:
-        print(f"Initializing Gemini with service account: {SERVICE_ACCOUNT_FILE}")
-        os.environ["GOOGLE_APPLICATION_CREDENTIALS"] = SERVICE_ACCOUNT_FILE
-        
-        if not os.path.exists(SERVICE_ACCOUNT_FILE):
-            print(f"WARNING: Service account file not found at {SERVICE_ACCOUNT_FILE}")
+        # Check if API key is set
+        if not GOOGLE_API_KEY or GOOGLE_API_KEY == "AIzaSyDYour-API-Key-Here":
+            print("⚠️ GEMINI API KEY NOT SET!")
+            print("🔧 TO FIX:")
+            print("   1. Go to: https://aistudio.google.com/app/apikey")
+            print("   2. Get your API key")
+            print("   3. Replace the GOOGLE_API_KEY value in recommender.py")
+            print("   4. Restart the server")
             return False
             
-        print("Loading credentials...")
-        import google.auth
-        creds, _ = google.auth.load_credentials_from_file(SERVICE_ACCOUNT_FILE)
-        print("Configuring genai...")
-        genai.configure(credentials=creds)
+        print(f"🔑 Using API key: {GOOGLE_API_KEY[:12]}...")
+        print(f"🤖 Model: {GEMINI_MODEL}")
+        
+        # Configure with API key
+        genai.configure(api_key=GOOGLE_API_KEY)
         
         # Test API connection
-        try:
-            print(f"Testing Gemini API connection with model {GEMINI_MODEL}...")
-            model = genai.GenerativeModel(GEMINI_MODEL)
-            test_resp = model.generate_content("Respond with only the word 'OK' to verify connection.")
-            test_text = _extract_text_from_gemini_response(test_resp)
-            print(f"Gemini API test response: {test_text[:50]}...")
-        except Exception as e:
-            print(f"Gemini API test failed: {str(e)}")
-            return False
+        print("🧪 Testing Gemini API connection...")
+        model = genai.GenerativeModel(GEMINI_MODEL)
+        test_resp = model.generate_content("Respond with only 'OK' to verify connection.")
+        test_text = _extract_text_from_gemini_response(test_resp)
+        print(f"✅ Gemini API test successful: {test_text.strip()}")
             
         _gemini_initialized = True
-        print("Gemini initialization completed successfully!")
+        print("🎉 Gemini initialization completed successfully!")
         return True
         
     except Exception as e:
-        print(f"Gemini initialization failed: {str(e)}")
+        print(f"❌ Gemini initialization failed: {str(e)}")
+        print("🔧 Common solutions:")
+        print("   - Check your API key is correct")
+        print("   - Ensure you have internet connection") 
+        print("   - Verify your Google AI Studio account is active")
         import traceback
         traceback.print_exc()
         _gemini_initialized = False
@@ -676,13 +682,17 @@ Example 1: Previous provider match (30) + all conditions (25) + close distance (
 Example 2: No previous provider (0) + 2 conditions (10) + medium distance (10) + good specialty match (10) + pending case (10) = 40 points
 
 === OUTPUT FORMAT (STRICT) ===
-Return a JSON array like:
+You MUST return EXACTLY {len(limited)} patient scores in a JSON array.
+Each patient in the input MUST appear in the output. Missing any patient will result in an error.
+
+Expected format:
 [
-  {{"ID":"53416001","Match_Score":93,"Reason":"Previous provider 30pts + surgery+discharge 10pts + close 20pts + ortho match 15pts + open 10pts"}},
-  {{"ID":"53416015","Match_Score":65,"Reason":"No prev provider 0pts + fall 5pts + medium dist 10pts + good match 10pts + pending 10pts"}}
+  {{"ID":"53416001","Match_Score":93,"Reason":"Same Previous provider, close proximity, recent discharge, specialty match, Hold Duration coming to end"}},
+  {{"ID":"53416015","Match_Score":65,"Reason":"No prev provider, Recent fall, medium distance, Recent Hospital discharge, pending Assignment"}}
 ]
 
-ONLY the JSON array. No markdown, no backticks, no extra commentary.
+CRITICAL: You must score ALL {len(limited)} patients provided above. 
+ONLY return the JSON array. No markdown, no backticks, no extra commentary.
 Calculate scores precisely using the percentage weights above.
 """
     return prompt
@@ -695,64 +705,141 @@ def ai_score(candidates: List[Dict[str,Any]],
     if not init_gemini():
         raise RuntimeError("Gemini initialization failed")
 
-    payload_prompt = _build_ai_payload(clinician_info, candidates, [])
-    model = genai.GenerativeModel(GEMINI_MODEL)
+    # Process in smaller batches to avoid token limits and ensure all patients are scored
+    batch_size = 5  # Reduced to 5 patients at a time for better AI reliability
+    all_scored = []
     
-    try:
-        resp = model.generate_content(
-            payload_prompt,
-            generation_config={"temperature": AI_TEMPERATURE, "max_output_tokens": AI_MAX_OUTPUT_TOKENS}
-        )
+    for i in range(0, len(candidates), batch_size):
+        batch = candidates[i:i + batch_size]
+        print(f"🔄 Processing batch {i//batch_size + 1}: patients {i+1}-{min(i+batch_size, len(candidates))}")
         
-        raw = _extract_text_from_gemini_response(resp)
-        if not raw:
-            raise ValueError("Empty response from Gemini API")
-            
-        cleaned = _clean_ai_json(raw)
-        if not cleaned:
-            # Log the raw response for debugging
-            print(f"Warning: Could not extract valid JSON from Gemini response. Raw response: {raw[:200]}...")
-            raise ValueError(f"Failed to extract JSON from Gemini response: {raw[:100]}...")
-            
         try:
-            data = json.loads(cleaned)
-        except json.JSONDecodeError as e:
-            # Log the attempted JSON for debugging
-            print(f"Warning: JSON parsing error. Attempted to parse: {cleaned[:200]}...")
-            raise ValueError(f"JSON parsing error: {str(e)}. Attempted to parse: {cleaned[:100]}...")
+            batch_scored = _process_ai_batch(batch, clinician_info, active_case_ids_resolved)
+            all_scored.extend(batch_scored)
+            print(f"✅ Successfully scored {len(batch_scored)} patients in this batch")
+        except Exception as e:
+            print(f"❌ Batch {i//batch_size + 1} failed: {str(e)}")
+            # Add unscored patients with default scores
+            for candidate in batch:
+                enriched = candidate.copy()
+                enriched["Match_Score"] = 0
+                enriched["Reason"] = f"AI batch processing failed: {str(e)[:100]}"
+                all_scored.append(enriched)
+    
+    print(f"🎉 Total AI scoring complete: {len(all_scored)} patients processed")
+    return all_scored
+
+def _process_ai_batch(candidates: List[Dict[str,Any]],
+                     clinician_info: Dict[str,Any],
+                     active_case_ids_resolved: List[str]) -> List[Dict[str,Any]]:
+    """Process a small batch of candidates through Gemini AI with retry logic"""
+    
+    max_retries = 3
+    retry_count = 0
+    
+    while retry_count < max_retries:
+        try:
+            payload_prompt = _build_ai_payload(clinician_info, candidates, [])
+            model = genai.GenerativeModel(GEMINI_MODEL)
             
-        # Validate the response structure
-        if not isinstance(data, list):
-            raise ValueError(f"Expected a JSON array from Gemini, got: {type(data).__name__}")
+            resp = model.generate_content(
+                payload_prompt,
+                generation_config={
+                    "temperature": AI_TEMPERATURE, 
+                    "max_output_tokens": AI_MAX_OUTPUT_TOKENS,
+                    "top_p": 0.8,
+                    "top_k": 40
+                }
+            )
             
-        # Attach scores back to candidates
-        by_id = {str(c["ID"]): c for c in candidates}
-        out: List[Dict[str,Any]] = []
-        for item in data:
-            if not isinstance(item, dict):
-                continue  # Skip non-dict items
+            raw = _extract_text_from_gemini_response(resp)
+            print(f"🔍 Attempt {retry_count + 1}: Gemini raw response length: {len(raw) if raw else 0} characters")
+            
+            if not raw:
+                raise ValueError("Empty response from Gemini API")
                 
-            pid = str(item.get("ID", ""))
-            if not pid:
-                continue  # Skip items without ID
+            cleaned = _clean_ai_json(raw)
+            print(f"🔍 Cleaned JSON length: {len(cleaned) if cleaned else 0} characters")
+            
+            if not cleaned:
+                print(f"Warning: Could not extract valid JSON from Gemini response. Raw response: {raw[:500]}...")
+                raise ValueError(f"Failed to extract JSON from Gemini response: {raw[:100]}...")
                 
-            if pid in by_id:
+            try:
+                data = json.loads(cleaned)
+                print(f"🔍 Parsed JSON: Found {len(data) if isinstance(data, list) else 'not a list'} items")
+            except json.JSONDecodeError as e:
+                print(f"Warning: JSON parsing error. Attempted to parse: {cleaned[:200]}...")
+                raise ValueError(f"JSON parsing error: {str(e)}. Attempted to parse: {cleaned[:100]}...")
+                
+            # Validate the response structure
+            if not isinstance(data, list):
+                raise ValueError(f"Expected a JSON array from Gemini, got: {type(data).__name__}")
+                
+            # Check if we got scores for all patients
+            scored_patient_ids = {str(item.get("ID", "")) for item in data if isinstance(item, dict) and item.get("ID")}
+            expected_patient_ids = {str(c["ID"]) for c in candidates}
+            missing_ids = expected_patient_ids - scored_patient_ids
+            
+            if missing_ids:
+                print(f"⚠️ Attempt {retry_count + 1}: AI missed {len(missing_ids)} patients: {list(missing_ids)[:5]}")
+                if retry_count < max_retries - 1:
+                    retry_count += 1
+                    print(f"🔄 Retrying batch processing (attempt {retry_count + 1}/{max_retries})...")
+                    continue
+            
+            # Process the results
+            by_id = {str(c["ID"]): c for c in candidates}
+            scored_ids = set()
+            out: List[Dict[str,Any]] = []
+            
+            # First, process all candidates that Gemini scored
+            for item in data:
+                if not isinstance(item, dict):
+                    continue
+                    
+                pid = str(item.get("ID", ""))
+                if not pid or pid not in by_id:
+                    continue
+                    
                 enriched = by_id[pid].copy()
                 try:
                     match_score = float(item.get("Match_Score", 0))
                     enriched["Match_Score"] = match_score
                 except (ValueError, TypeError):
-                    # Default score if conversion fails
                     enriched["Match_Score"] = 0
                     
                 enriched["Reason"] = str(item.get("Reason", ""))
                 out.append(enriched)
-                
-        return out
-        
-    except Exception as e:
-        # Add more context to the exception
-        raise type(e)(f"Gemini API error: {str(e)}")
+                scored_ids.add(pid)
+            
+            # Add any candidates that still weren't scored (should be minimal now)
+            for candidate in candidates:
+                candidate_id = str(candidate["ID"])
+                if candidate_id not in scored_ids:
+                    print(f"⚠️ Final fallback for patient {candidate_id}")
+                    enriched = candidate.copy()
+                    enriched["Match_Score"] = 0
+                    enriched["Reason"] = f"AI scoring incomplete after {retry_count + 1} attempts"
+                    out.append(enriched)
+                    
+            print(f"✅ Batch complete: {len(scored_ids)} AI-scored + {len(out) - len(scored_ids)} fallback = {len(out)} total")
+            return out
+            
+        except Exception as e:
+            print(f"❌ Attempt {retry_count + 1} failed: {str(e)}")
+            retry_count += 1
+            
+            if retry_count >= max_retries:
+                print(f"💥 All {max_retries} attempts failed. Using fallback scores.")
+                # Return all patients with fallback scores
+                out = []
+                for candidate in candidates:
+                    enriched = candidate.copy()
+                    enriched["Match_Score"] = 0
+                    enriched["Reason"] = f"AI batch processing failed after {max_retries} attempts: {str(e)[:100]}"
+                    out.append(enriched)
+                return out
 
 # ====================== MAIN ENTRY ======================
 def recommend_patients(clinician_id: str, radius: float = 50.0, top_k: int = 50) -> Dict[str, Any]:
@@ -808,15 +895,23 @@ def recommend_patients(clinician_id: str, radius: float = 50.0, top_k: int = 50)
     clinician_coords = None
     lat = clinician_info.get("Latitude")
     lon = clinician_info.get("Longitude")
+    print(f"Raw clinician coordinates from API: LAT={lat}, LON={lon}")
     clinician_coords = _coords_from_cols(lat, lon)
     
     # If individual coordinates not available, try facility coordinates
     if not clinician_coords:
         facility_lat = clinician_info.get("Facility_Lat")
         facility_lon = clinician_info.get("Facility_Long")
+        print(f"Trying facility coordinates: LAT={facility_lat}, LON={facility_lon}")
         clinician_coords = _coords_from_cols(facility_lat, facility_lon)
         
-    print(f"Clinician coordinates: {clinician_coords}")
+    print(f"📍 Final clinician coordinates: {clinician_coords}")
+    
+    if not clinician_coords:
+        print("⚠️ WARNING: Clinician has no valid coordinates!")
+        print("   This will cause distance calculations to fail")
+        print("   Recommendations will be based on discipline matching only")
+        print(f"   Using large radius (≥500 miles) will include patients despite missing coordinates")
 
     # ---------- Active case context ----------
     # Since we're using API data, active cases count is in ACTIVE_CASES field
@@ -1046,6 +1141,11 @@ def recommend_patients(clinician_id: str, radius: float = 50.0, top_k: int = 50)
     print(f"Applying radius filter: {radius} miles")
     candidates_before_radius = len(scored)
     
+    # Count candidates by filtering reason
+    no_distance_count = 0
+    within_radius_count = 0
+    outside_radius_count = 0
+    
     # Filter candidates by radius - only include patients within specified distance
     filtered_by_radius = []
     for candidate in scored:
@@ -1056,18 +1156,40 @@ def recommend_patients(clinician_id: str, radius: float = 50.0, top_k: int = 50)
         if distance_to_check is None:
             distance_to_check = candidate.get("Distance_to_Clinician")
         
-        # If still no distance, skip this candidate (shouldn't happen but safety check)
+        # If still no distance information available
         if distance_to_check is None:
-            print(f"⚠️ Skipping candidate {candidate.get('ID')} - no distance information")
+            no_distance_count += 1
+            # IMPORTANT FIX: Include candidates without distance info if radius is large (>500 miles)
+            # This handles cases where clinician coordinates are missing from API
+            if radius >= 500:
+                print(f"🔄 Including candidate {candidate.get('ID')} despite missing distance (large radius: {radius} miles)")
+                filtered_by_radius.append(candidate)
+            else:
+                print(f"⚠️ Skipping candidate {candidate.get('ID')} - no distance information (radius too small: {radius} miles)")
             continue
             
         # Include candidate if within radius
         if distance_to_check <= radius:
+            within_radius_count += 1
             filtered_by_radius.append(candidate)
         else:
+            outside_radius_count += 1
             print(f"Filtered out patient {candidate.get('NAME', 'Unknown')} (ID: {candidate.get('ID')}) - distance {distance_to_check:.1f} miles > {radius} miles")
     
-    print(f"Radius filtering: {candidates_before_radius} → {len(filtered_by_radius)} candidates")
+    print(f"📊 Radius filtering results:")
+    print(f"   - Candidates before filtering: {candidates_before_radius}")
+    print(f"   - Within radius ({radius} miles): {within_radius_count}")
+    print(f"   - Outside radius: {outside_radius_count}")
+    print(f"   - No distance info: {no_distance_count}")
+    print(f"   - Final candidates: {len(filtered_by_radius)}")
+    
+    if no_distance_count > 0:
+        print(f"💡 Note: {no_distance_count} candidates had missing distance info")
+        if radius >= 500:
+            print(f"   ✅ Included them due to large radius ({radius} miles)")
+        else:
+            print(f"   ❌ Excluded them due to small radius ({radius} miles)")
+            print(f"   💡 Try using radius ≥ 500 miles to include patients with missing coordinates")
     
     # Take the top results from filtered candidates
     out_recs = filtered_by_radius[:max(1, min(top_k, len(filtered_by_radius)))]
@@ -1076,7 +1198,7 @@ def recommend_patients(clinician_id: str, radius: float = 50.0, top_k: int = 50)
         "search_params": {
             "provider_id": cid,
             "radius_miles": radius,
-            "limit": top_k
+            "max_requested": top_k
         },
         "filtering": {
             "total_before_radius_filter": candidates_before_radius,
@@ -1117,8 +1239,8 @@ def recommend_patients(clinician_id: str, radius: float = 50.0, top_k: int = 50)
         },
         "processing_time_seconds": round(time.time() - t0, 3),
         "total_candidates": len(candidates),
-        "top_k": len(out_recs),
-        "requested_limit": top_k,
+        "recommendations_count": len(out_recs),
+        "max_requested": top_k,
         "errors": errors,
         "recommendations": clean_nan_values(out_recs),
     }
@@ -1136,7 +1258,7 @@ if __name__ == "__main__":
     print(f"Gemini initialization result: {gemini_ready}")
     
     # Test with a clinician that has active cases
-    test_id = "816b9599-4f37-40d3-9886-a75d9c915782"  # Dr. Ayesha Malik who has active case 53416034
+    test_id = "6053290"  # Dr. Ayesha Malik who has active case 53416034
     # Specify how many recommendations to return
     test_limit = 10
     
