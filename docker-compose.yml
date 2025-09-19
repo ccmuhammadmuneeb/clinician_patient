@@ -1,0 +1,35 @@
+version: '3.8'
+
+services:
+  ai-patient-recommender:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    ports:
+      - "8008:8008"
+    environment:
+      - PYTHONPATH=/app
+      - PORT=8008
+      # Add your Google AI API key here or via .env file
+      # - GOOGLE_API_KEY=your_api_key_here
+    volumes:
+      # Mount Google Cloud credentials if using service account
+      # - ./aiml-365220-99e7125f22cc.json:/app/credentials.json:ro
+      # Mount data directory for persistent data
+      - ./data:/app/data:ro
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "python", "-c", "import requests; requests.get('http://localhost:8008/', timeout=10)"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 40s
+    # Resource limits for optimization
+    deploy:
+      resources:
+        limits:
+          memory: 1GB
+          cpus: '1.0'
+        reservations:
+          memory: 512MB
+          cpus: '0.5'

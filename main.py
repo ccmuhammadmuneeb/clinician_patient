@@ -257,7 +257,7 @@ async def get_recommendations(provider_id: str, radius: float = 50.0):
 if __name__ == "__main__":
     import uvicorn
     print("🚀 Starting AI Patient Recommendation Server...")
-    print("📍 Server will be available at: http://localhost:8006")
+    print("📍 Server will be available at: http://localhost:8008")
     print("🔧 Press Ctrl+C to stop the server")
     print()
-    uvicorn.run(app, host="0.0.0.0", port=8006)
+    uvicorn.run(app, host="0.0.0.0", port=8008)

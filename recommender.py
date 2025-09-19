@@ -1,25 +1,13 @@
 """
 recommender.py
 
-- Exposes recommend_patients(clinician_id: str, top_k: int = 50) -> Dict[str, Any]
-- Reads clinicians from CSV and patients from JSON (sample_patient_cases.json)
-- Patient discipline derived from CASE_NO prefix (PT/OT/ST) for strict matching
-- Computes distance to clinician and to nearest active case (if clinician has any)
-- Matches clinician sub-specialty with patient**3. DISTANCE CALCULATION - 20%**
-Distance calculation rules:
-- If clinician HAS active cases AND patient is within 5 miles of any active case: Use distance between patient and nearest active case
-- Otherwise: Use direct distance between clinician and patient
+Muhammad Muneeb 
+Employee ID: 19242
 
-Scoring (based on distance ranges):
-- 0-5 miles: 20 points (excellent)
-- 5-10 miles: 15 points (very good)  
-- 10-15 miles: 12 points (good)
-- 15-20 miles: 10 points (acceptable)
-- 20-25 miles: 8 points (fair)
-- 25-30 miles: 5 points (poor)
-- 30+ miles: 2 points (very poor) patient profile
-- 100% Gemini-scored ranking (no hardcoded weights); distance-only fallback if AI fails
-- Returns JSON-serializable dicts; never raises HTTPException here (API layer can decide)
+Last Edited: 18th September 2025
+
+
+
 """
 
 import os
@@ -28,10 +16,10 @@ import time
 import re
 import math
 import requests
-from typing import Any, Dict, List, Tuple, Optional
-
 import pandas as pd
+from typing import Any, Dict, List, Tuple, Optional
 from datetime import datetime
+import traceback
 # import google.auth - moved to function level to avoid module-level hanging
 
 # ===== Gemini import, lazy init guard =====
@@ -55,15 +43,67 @@ AI_TEMPERATURE = 0.1
 
 # API Configuration
 CLINICIAN_API_BASE = "https://uat-webservices.mtbc.com/Fox/api/RegionalDirector/GetClinicianDetails_V1"
+PROXIMITY_CASES_API_BASE = "https://uat-webservices.mtbc.com/Fox/api/RegionalDirector/GetProximityCasesForProvider"
+
+def fetch_clinician_details_from_api(provider_id: str) -> Optional[Dict[str, Any]]:
+    """
+    Fetch clinician details from the API for a given provider ID.
+    
+    Args:
+        provider_id: The provider ID to fetch details for
+        
+    Returns:
+        Dict containing clinician details, or None if request fails
+    """
+    try:
+        url = f"{CLINICIAN_API_BASE}?ProviderId={provider_id}"
+        headers = {
+            'Accept': 'application/json',
+            'Content-Type': 'application/json',
+            'PracticeCode': '1012714'
+        }
+        print(f"Making request to: {url}")
+        print(f"Headers: {headers}")
+        
+        response = requests.get(url, headers=headers)
+        print(f"Response status code: {response.status_code}")
+        
+        if response.status_code == 200:
+            data = response.json()
+            print(f"Response data type: {type(data)}")
+            
+            # Handle the new API response structure with success/message/data
+            if isinstance(data, dict) and "success" in data:
+                if data.get("success") == True and "data" in data:
+                    clinician_data = data["data"]
+                    print(f"Found clinician: {clinician_data.get('FirstName', '')} {clinician_data.get('LastName', '')}")
+                    return clinician_data
+                else:
+                    print(f"API returned error: {data.get('message', 'Unknown error')}")
+                    return None
+            # Handle legacy response format
+            elif isinstance(data, list) and len(data) > 0:
+                clinician_info = data[0]  # Take first clinician
+                print(f"Found clinician: {clinician_info.get('Name', 'Unknown')}")
+                return clinician_info
+            elif isinstance(data, dict):
+                print(f"Found clinician: {data.get('Name', 'Unknown')}")
+                return data
+            else:
+                print("No clinician data in response")
+                return None
+        else:
+            print(f"API request failed with status: {response.status_code}")
+            return None
+            
+    except Exception as e:
+        print(f"Error fetching clinician details: {str(e)}")
+        return None
 API_HEADERS = {
     "Accept": "application/json",
     "PracticeCode": "1012714"  # Add PracticeCode header as required
 }
-API_TIMEOUT = 30
-
-# Data file paths (fallback)
-CLINICIAN_CSV = os.path.abspath(r"C:\Users\MUHAMMADMUNEEB3\v2\data\clinician_list.csv")
-PATIENT_JSON = os.path.abspath(r"C:\Users\MUHAMMADMUNEEB3\v2\data\sample_patient_cases.json")
+API_TIMEOUT = 5  # Reduced from 10 to 5 seconds for faster response
 
 # Lazy init flag
 _gemini_initialized = False
@@ -122,9 +162,8 @@ def fetch_clinician_from_api(provider_id: str) -> Optional[Dict[str, Any]]:
             print(f"API returned array with {len(api_data)} items")
             # If it's an array, take the first item
             if not api_data:
-                print("API returned empty array - falling back to mock data for testing")
-                # Return mock data structure for testing when API returns empty
-                return create_mock_clinician_data(provider_id)
+                print("API returned empty array - no clinician data found")
+                return None
             api_data = api_data[0] if api_data else {}
             print(f"Using first item from array: {list(api_data.keys()) if isinstance(api_data, dict) else type(api_data)}")
         
@@ -191,7 +230,303 @@ def fetch_clinician_from_api(provider_id: str) -> Optional[Dict[str, Any]]:
         traceback.print_exc()
         return None
 
+def fetch_proximity_cases_from_api(provider_id: str, discipline_id: str, radius_miles: float) -> Optional[Dict[str, Any]]:
+    """
+    Fetch proximity cases data from the API using Provider ID, Discipline ID, and radius
+    
+    Args:
+        provider_id: The FOX_PROVIDER_ID to fetch cases for
+        discipline_id: The discipline ID from clinician data
+        radius_miles: The radius in miles to search for cases
+        
+    Returns:
+        Dictionary containing cases data or None if failed
+    """
+    try:
+        print(f"Fetching proximity cases for Provider ID: {provider_id}, Discipline: {discipline_id}, Radius: {radius_miles} miles")
+        
+        # Build API URL with parameters
+        url = f"{PROXIMITY_CASES_API_BASE}?ProviderID={provider_id}&disciplineId={discipline_id}&radiusMiles={radius_miles}"
+        print(f"Proximity Cases API URL: {url}")
+        print(f"Headers: {API_HEADERS}")
+        
+        response = requests.get(url, headers=API_HEADERS, timeout=API_TIMEOUT)
+        print(f"Proximity Cases API Response Status: {response.status_code}")
+        
+        if response.status_code != 200:
+            print(f"Proximity Cases API request failed with status {response.status_code}: {response.text}")
+            return None
+            
+        # Parse JSON response
+        api_data = response.json()
+        print(f"Proximity Cases API Response structure: {list(api_data.keys()) if isinstance(api_data, dict) else type(api_data)}")
+        
+        # Handle both direct response and wrapped response
+        cases_data = None
+        if isinstance(api_data, dict):
+            # Check for success wrapper
+            if "success" in api_data and not api_data.get("success", False):
+                print(f"Proximity Cases API returned unsuccessful response: {api_data.get('message', 'Unknown error')}")
+                return None
+                
+            # Try to find cases data in different possible locations
+            if "Cases" in api_data:
+                cases_data = api_data["Cases"]
+            elif "data" in api_data and isinstance(api_data["data"], dict) and "Cases" in api_data["data"]:
+                cases_data = api_data["data"]["Cases"]
+            elif "data" in api_data:
+                cases_data = api_data["data"]
+            else:
+                cases_data = api_data
+        else:
+            cases_data = api_data
+            
+        if not cases_data:
+            print("No cases data found in API response")
+            return None
+            
+        print(f"Found {len(cases_data)} case groups in API response")
+        return {"Cases": cases_data}
+        
+    except requests.RequestException as e:
+        print(f"Network error fetching proximity cases: {str(e)}")
+        return None
+    except json.JSONDecodeError as e:
+        print(f"JSON parsing error in proximity cases: {str(e)}")
+        return None
+    except Exception as e:
+        print(f"Unexpected error fetching proximity cases: {str(e)}")
+        traceback.print_exc()
+        return None
+
+def transform_proximity_cases_to_patients(cases_data: Dict[str, Any], discipline: str = 'PT') -> List[Dict[str, Any]]:
+    """
+    Transform the proximity cases API response into patient format compatible with existing AI system
+    
+    Args:
+        cases_data: Raw cases data from proximity API
+        discipline: The discipline these patients are for (PT, OT, ST)
+        
+    Returns:
+        List of patient dictionaries in the expected format
+    """
+    patients = []
+    
+    try:
+        cases = cases_data.get("Cases", [])
+        print(f"Processing {len(cases)} case groups from proximity API...")
+        
+        for case_group in cases:
+            if not isinstance(case_group, dict):
+                continue
+                
+            # Get active case coordinates for distance calculation
+            active_case = case_group.get("ClinicianActiveCase")
+            active_case_coords = None
+            active_case_name = None
+            if active_case and isinstance(active_case, dict):
+                active_lat = active_case.get("Latitude")
+                active_lon = active_case.get("Longitude") 
+                active_case_name = f"{active_case.get('FirstName', '')} {active_case.get('LastName', '')}".strip()
+                if not active_case_name:
+                    active_case_name = f"Active Case {active_case.get('CaseId', '')}"
+                    
+                if active_lat and active_lon:
+                    try:
+                        active_case_coords = (float(active_lat), float(active_lon))
+                    except (ValueError, TypeError):
+                        active_case_coords = None
+                
+            # Skip active cases - they are already assigned to the clinician
+            # Only process nearby cases (available patients needing assignment)
+            nearby_cases = case_group.get("NearbyCases", [])
+            for nearby_case in nearby_cases:
+                if isinstance(nearby_case, dict):
+                    patient = transform_single_case_to_patient(
+                        nearby_case, 
+                        is_active_case=False, 
+                        active_case_coords=active_case_coords, 
+                        discipline=discipline,
+                        active_case_name=active_case_name
+                    )
+                    if patient:
+                        patients.append(patient)
+                        
+        print(f"Transformed {len(patients)} patients from proximity cases API")
+        return patients
+        
+    except Exception as e:
+        print(f"Error transforming proximity cases: {str(e)}")
+        traceback.print_exc()
+        return []
+
+def transform_single_case_to_patient(case_data: Dict[str, Any], is_active_case: bool = False, active_case_coords: Optional[Tuple[float, float]] = None, discipline: str = 'PT', active_case_name: Optional[str] = None) -> Optional[Dict[str, Any]]:
+    """
+    Transform a single case from proximity API into patient format
+    
+    Args:
+        case_data: Single case data from API
+        is_active_case: Whether this is an active case or nearby case
+        active_case_coords: Coordinates of the active case for distance calculation
+        discipline: The discipline this patient is for (PT, OT, ST)
+        
+    Returns:
+        Patient dictionary or None if transformation fails
+    """
+    try:
+        # Extract patient info - handle both active case and nearby case formats
+        case_id = case_data.get("CASE_ID")
+        
+        if not case_id:
+            # Try alternative ID fields
+            case_id = (case_data.get("ID") or 
+                      case_data.get("CaseId") or 
+                      case_data.get("Case_ID") or
+                      case_data.get("PatientId") or
+                      case_data.get("PATIENT_ID"))
+            
+        if not case_id:
+            return None
+            
+        # For active cases, names are FIRST_NAME/LAST_NAME
+        # For nearby cases, names are PatientFirstName/PatientLastName
+        first_name = (case_data.get("FIRST_NAME") or 
+                     case_data.get("PatientFirstName") or "")
+        last_name = (case_data.get("LAST_NAME") or 
+                    case_data.get("PatientLastName") or "")
+        
+        # Build patient record compatible with existing system
+        patient = {
+            "ID": str(case_id),
+            "CASE_ID": case_id,
+            "CASE_NO": case_data.get("CASE_NO") or case_data.get("RT_CASE_NO") or "",
+            "First_Name": first_name,
+            "Last_Name": last_name,
+            "NAME": f"{last_name}, {first_name}".strip(" ,"),
+            
+            # Location data
+            "CASE_LAT": case_data.get("Latitude") or case_data.get("CASE_LAT"),
+            "CASE_LON": case_data.get("Longitude") or case_data.get("CASE_LON"),
+            "Address": case_data.get("Address", ""),
+            "City": case_data.get("City", ""),
+            "State": case_data.get("State", ""),
+            "ZIP": case_data.get("ZIP", ""),
+            
+            # Medical/Case info
+            "DISCIPLINE": case_data.get("Discipline", ""),
+            "discipline_id": case_data.get("DISCIPLINE_ID") or case_data.get("discipline_id"),
+            "CASE_STATUS": case_data.get("CASE_STATUS", ""),
+            "CASE_STATUS_ID": case_data.get("CASE_STATUS_ID"),
+            
+            # Dates
+            "ADMISSION_DATE": case_data.get("ADMISSION_DATE"),
+            "DISCHARGE_DATE": case_data.get("DISCHARGE_DATE"),
+            "HOLD_DATE": case_data.get("HOLD_DATE"),
+            "HOLD_TILL_DATE": case_data.get("HOLD_TILL_DATE"),
+            "START_CARE_DATE": case_data.get("START_CARE_DATE"),
+            "NON_ADMIT_DATE": case_data.get("NON_ADMIT_DATE"),
+            "Hold_Follow_Up_Date": case_data.get("Hold_Follow_Up_Date"),
+            
+            # Provider info
+            "TREATING_PROVIDER_ID": case_data.get("TREATING_PROVIDER_ID"),
+            "Previous_Provider": str(case_data.get("TREATING_PROVIDER_ID")) if case_data.get("TREATING_PROVIDER_ID") else None,
+            
+            # Additional info
+            "Gender": case_data.get("Gender", ""),
+            "Date_Of_Birth": case_data.get("Date_Of_Birth"),
+            "PatientProfile": case_data.get("PatientProfile", "[]"),
+            "PATIENT_ACCOUNT": case_data.get("PATIENT_ACCOUNT"),
+            "CHART_ID": case_data.get("CHART_ID", ""),
+            "SSN": case_data.get("SSN"),
+            "FinancialClassCode": case_data.get("FinancialClassCode", ""),
+            "region": case_data.get("region", ""),
+            "LocCode": case_data.get("LocCode", ""),
+            "LocName": case_data.get("LocName", ""),
+            "FacilityName": case_data.get("FacilityName", ""),
+            "FacilityCode": case_data.get("FacilityCode", ""),
+            "HOLD_DURATION": case_data.get("HOLD_DURATION", ""),
+            "Parent_Id": case_data.get("Parent_Id"),
+            
+            # Metadata
+            "is_active_case": is_active_case,
+            "active_case_name": active_case_name,
+            "modified_date": case_data.get("modified_date") or case_data.get("MODIFIED_DATE")
+        }
+        
+        # Set discipline based on what was requested from API
+        patient["DISCIPLINE"] = discipline.upper()
+        
+        # Calculate distance from active case if coordinates available
+        if active_case_coords and not is_active_case:
+            patient_lat = patient.get("CASE_LAT")
+            patient_lon = patient.get("CASE_LON") 
+            if patient_lat and patient_lon:
+                try:
+                    patient_coords = (float(patient_lat), float(patient_lon))
+                    distance = calculate_distance(active_case_coords, patient_coords)
+                    if distance is not None:
+                        patient["DISTANCE_FROM_ACTIVE_CASE"] = round(distance, 2)
+                        patient["DISTANCE_FROM_ACTIVE_CASE_UNIT"] = "miles"
+                except (ValueError, TypeError):
+                    pass
+            
+        return patient
+        
+    except Exception as e:
+        print(f"Error transforming single case {case_data.get('CASE_ID', 'unknown')}: {str(e)}")
+        return None
+
 def create_mock_clinician_data(provider_id: str) -> Dict[str, Any]:
+    """
+    Create mock clinician data when API returns empty response
+    This uses the structure you provided as example
+    """
+    print(f"Creating mock data for Provider ID: {provider_id}")
+    
+    # Mock data based on your provided structure
+    mock_data = {
+        "FOX_PROVIDER_ID": provider_id,
+        "Name": "Carey Sambogna",
+        "FirstName": "Carey",
+        "LastName": "Sambogna", 
+        "Discipline": "PT",
+        "DisciplineName": "Physical Therapy",
+        "Latitude": 29.947983299999997,
+        "Longitude": -85.4179766,
+        "Facility_Lat": 40.889624,
+        "Facility_Long": -74.032214,
+        "IS_Facility": True,
+        "LocalAddress": "655 Pomander Walk",
+        "CITY": "Voorhees",
+        "STATE": "NJ", 
+        "ACTIVE_CASES": 16,
+        "Subspecialty": "Certified Clinical Instructor, Geriatric Clinical Specialist, Cardiovascular and Pulmonary Clinical Specialist",
+        "specialties": [
+            "Certified Clinical Instructor",
+            "Certified Strength and Conditioning Specialist", 
+            "Geriatric Clinical Specialist",
+            "Cardiovascular and Pulmonary Clinical Specialist",
+            "Oncologic Clinical Specialist"
+        ],
+        "professional_info": [
+            {
+                "ClinicianSpecialitiesDescription": "Certified Clinical Instructor",
+                "ActiveCertification": "False",
+                "ExperiencedTreatingProvider": "True"
+            },
+            {
+                "ClinicianSpecialitiesDescription": "Geriatric Clinical Specialist",
+                "ActiveCertification": "False", 
+                "ExperiencedTreatingProvider": "True"
+            }
+        ],
+        "UserID": "99910678",
+        "INDIVIDUAL_NPI": "",
+        "VISIT_QOUTA_WEEK": "40"
+    }
+    
+    print(f"Mock clinician created: {mock_data.get('Name')} ({mock_data.get('Discipline')})")
+    return mock_data
     """
     Create mock clinician data when API returns empty response
     This uses the structure you provided as example
@@ -248,47 +583,47 @@ def init_gemini() -> bool:
     """Initialize Gemini SDK only when needed."""
     global _gemini_initialized, genai, GEMINI_IMPORT_OK
     
-    print("🔧 Initializing Gemini AI...")
+    print("[INIT] Initializing Gemini AI...")
     
     if _gemini_initialized:
-        print("✅ Gemini already initialized")
+        print("[SUCCESS] Gemini already initialized")
         return True
         
     if not GEMINI_IMPORT_OK:
-        print("❌ Gemini import failed - google.generativeai package not installed")
+        print("[ERROR] Gemini import failed - google.generativeai package not installed")
         return False
         
     try:
         # Check if API key is set
         if not GOOGLE_API_KEY or GOOGLE_API_KEY == "AIzaSyDYour-API-Key-Here":
-            print("⚠️ GEMINI API KEY NOT SET!")
-            print("🔧 TO FIX:")
+            print("[WARNING] GEMINI API KEY NOT SET!")
+            print("[TO FIX]:")
             print("   1. Go to: https://aistudio.google.com/app/apikey")
             print("   2. Get your API key")
             print("   3. Replace the GOOGLE_API_KEY value in recommender.py")
             print("   4. Restart the server")
             return False
             
-        print(f"🔑 Using API key: {GOOGLE_API_KEY[:12]}...")
-        print(f"🤖 Model: {GEMINI_MODEL}")
+        print(f"[API_KEY] Using API key: {GOOGLE_API_KEY[:12]}...")
+        print(f"[MODEL] Model: {GEMINI_MODEL}")
         
         # Configure with API key
         genai.configure(api_key=GOOGLE_API_KEY)
         
         # Test API connection
-        print("🧪 Testing Gemini API connection...")
+        print("[TEST] Testing Gemini API connection...")
         model = genai.GenerativeModel(GEMINI_MODEL)
         test_resp = model.generate_content("Respond with only 'OK' to verify connection.")
         test_text = _extract_text_from_gemini_response(test_resp)
-        print(f"✅ Gemini API test successful: {test_text.strip()}")
+        print(f"[SUCCESS] Gemini API test successful: {test_text.strip()}")
             
         _gemini_initialized = True
-        print("🎉 Gemini initialization completed successfully!")
+        print("[COMPLETE] Gemini initialization completed successfully!")
         return True
         
     except Exception as e:
-        print(f"❌ Gemini initialization failed: {str(e)}")
-        print("🔧 Common solutions:")
+        print(f"[ERROR] Gemini initialization failed: {str(e)}")
+        print("[SOLUTIONS] Common solutions:")
         print("   - Check your API key is correct")
         print("   - Ensure you have internet connection") 
         print("   - Verify your Google AI Studio account is active")
@@ -468,63 +803,124 @@ def _bool_from_date_field(v: Any) -> bool:
         return False
     return True
 
-# ====================== DATA LOADERS ======================
-def load_data() -> Tuple[pd.DataFrame, pd.DataFrame]:
-    """Load clinicians (CSV) and patients (JSON) with robust normalization."""
-    # Clinicians
-    clinicians = pd.read_csv(CLINICIAN_CSV, encoding="cp1252")
-    clinicians.columns = clinicians.columns.str.strip()
-    if "ID" not in clinicians.columns:
-        # Try alternate common ID column names; final fallback to index as string
-        if "Clinician_ID" in clinicians.columns:
-            clinicians["ID"] = clinicians["Clinician_ID"]
+def load_data(provider_id: str = "99910678", radius: float = 25.0) -> Tuple[Dict[str, Any], pd.DataFrame]:
+    """
+    Load clinician data from API and proximity cases as patient data.
+    
+    Args:
+        provider_id: Provider ID for the clinician (default from your example)
+        radius: Search radius in miles (default 25.0)
+    
+    Returns:
+        Tuple[Dict[str, Any], pd.DataFrame]: Clinician data and patients DataFrame
+    """
+    start_time = time.time()
+    try:
+        print(f"⏱️ [TIMING] Starting data load for Provider ID: {provider_id}")
+        
+        # Get clinician data from API
+        clinician_start = time.time()
+        print(f"Loading clinician data from API for Provider ID: {provider_id}")
+        clinician_data = fetch_clinician_details_from_api(provider_id)
+        clinician_time = time.time() - clinician_start
+        print(f"⏱️ [TIMING] Clinician API took: {clinician_time:.2f} seconds")
+        
+        if not clinician_data:
+            print(f"No clinician data found for Provider ID: {provider_id}")
+            raise ValueError(f"Provider ID '{provider_id}' not found in the system")
+        
+        
+        # Extract discipline_id from clinician data - check multiple field names
+        discipline = (clinician_data.get('DiciplineCode') or     # API has typo "DiciplineCode"  
+                     clinician_data.get('Discipline') or 
+                     'PT')  # Default to PT
+        discipline_id = get_discipline_id(discipline)
+        
+        print(f"Loading proximity cases for Provider: {provider_id}, Discipline: {discipline} (ID: {discipline_id}), Radius: {radius}")
+        
+        # Get proximity cases data
+        proximity_start = time.time()
+        proximity_cases = fetch_proximity_cases_from_api(provider_id, discipline_id, radius)
+        proximity_time = time.time() - proximity_start
+        print(f"⏱️ [TIMING] Proximity cases API took: {proximity_time:.2f} seconds")
+        
+        if proximity_cases:
+            # Transform proximity cases to patient format with discipline info
+            transform_start = time.time()
+            patient_list = transform_proximity_cases_to_patients(proximity_cases, discipline=discipline)
+            transform_time = time.time() - transform_start
+            print(f"⏱️ [TIMING] Data transformation took: {transform_time:.2f} seconds")
+            print(f"Loaded {len(patient_list)} patients from proximity cases API")
+            
         else:
-            clinicians["ID"] = clinicians.index.astype(str)
-    clinicians["ID"] = clinicians["ID"].astype(str)
-    clinicians.set_index("ID", inplace=True)
+            print("No proximity cases found for specific discipline")
+            print(f"🔄 Trying fallback with PT discipline for broader patient pool...")
+            
+            # Fallback: Try with PT discipline ID if original failed and it wasn't PT
+            if discipline.upper() != 'PT':
+                fallback_discipline_id = get_discipline_id('PT')
+                print(f"   Attempting fallback with PT discipline ID: {fallback_discipline_id}")
+                proximity_cases = fetch_proximity_cases_from_api(provider_id, fallback_discipline_id, radius)
+                
+                if proximity_cases:
+                    patient_list = transform_proximity_cases_to_patients(proximity_cases, discipline='PT')
+                    print(f"   ✅ Fallback successful! Loaded {len(patient_list)} PT patients for {discipline} clinician")
+                else:
+                    print(f"   ❌ Fallback also failed")
+                    patient_list = []
+            else:
+                patient_list = []
+        
+        # Convert to DataFrame for compatibility with existing code
+        patients_df = pd.DataFrame(patient_list)
+        
+        if not patients_df.empty and "CASE_ID" in patients_df.columns:
+                # Ensure ID column - Don't set as index since we need it as a column
+                patients_df["ID"] = patients_df["CASE_ID"].astype(str)
+                
+                # Don't set index - keep ID as a regular column
+                # patients_df.set_index("ID", inplace=True)
+                
+                # Patient coordinates (already formatted as string)
+                # Discipline (already extracted)
+                # Patient profile normalization
+                def _normalize_profile(profile):
+                    if isinstance(profile, list):
+                        return profile
+                    if isinstance(profile, str) and profile.strip() == "[]":
+                        return []
+                    return []
+                
+                if "PatientProfile" in patients_df.columns:
+                    patients_df["PatientProfile_Normalized"] = patients_df["PatientProfile"].apply(_normalize_profile)
+                else:
+                    patients_df["PatientProfile_Normalized"] = [[] for _ in range(len(patients_df))]
+        else:
+            print("No proximity cases found, returning empty DataFrame")
+            patients_df = pd.DataFrame()
+        
+        total_time = time.time() - start_time
+        print(f"⏱️ [TIMING] Total data load completed in: {total_time:.2f} seconds")
+        return clinician_data, patients_df
+        
+    except Exception as e:
+        print(f"Error loading data from API: {e}")
+        # Don't create mock data - re-raise the error
+        raise e
 
-    # Patients
-    with open(PATIENT_JSON, "r", encoding="utf-8") as f:
-        raw = json.load(f)
-    patients = pd.DataFrame(raw)
+def get_discipline_id(discipline: str) -> str:
+    """
+    Map discipline name to discipline ID based on your API specification
+    """
+    discipline_mapping = {
+        'PT': '605108',  # Physical Therapy - Correct ID
+        'OT': '605107',  # Occupational Therapy - Correct ID  
+        'ST': '605109',  # Speech Therapy - Correct ID
 
-    # Ensure ID/Name
-    patients["ID"] = patients["CASE_ID"].astype(str) if "CASE_ID" in patients.columns else patients.index.astype(str)
-    patients["NAME"] = (
-        patients.get("First_Name", pd.Series([""]*len(patients))).fillna("") + " " +
-        patients.get("Last_Name", pd.Series([""]*len(patients))).fillna("")
-    ).str.strip()
-
-    # Patient coordinates
-    def _pc(r):
-        lat = r.get("CASE_LAT")
-        lon = r.get("CASE_LON")
-        c = _coords_from_cols(lat, lon)
-        return f"{c[0]},{c[1]}" if c else None
-    patients["Patient_Coordinates"] = patients.apply(_pc, axis=1)
-
-    # Discipline from CASE_NO
-    patients["DISCIPLINE"] = patients.get("CASE_NO", "").apply(extract_discipline_from_case_no)
-
-    # Previous provider if present under any common name
-    def _prevprov(r):
-        for f in ["Previous_Provider", "Previus_Provider", "LAST PROVIDER", "LAST_PROVIDER"]:
-            if f in r and pd.notna(r[f]) and str(r[f]).strip():
-                return str(r[f]).strip()
-        return None
-    patients["Previous_Provider"] = patients.apply(_prevprov, axis=1)
+        # Add more mappings as needed
+    }
     
-    # Normalize PatientProfile field (could be string or list)
-    def _normalize_profile(profile):
-        if isinstance(profile, list):
-            return profile
-        if isinstance(profile, str) and profile.strip() == "[]":
-            return []
-        return []
-    
-    patients["PatientProfile_Normalized"] = patients["PatientProfile"].apply(_normalize_profile)
-
-    return clinicians, patients
+    return discipline_mapping.get(discipline.upper(), '605108')  # Default to PT
 
 # ====================== AI PROMPT & SCORING ======================
 def _build_ai_payload(clinician_info: Dict[str, Any],
@@ -559,8 +955,8 @@ You MUST:
     "DisciplineName": clinician_info.get("DisciplineName", ""),
     "Subspecialty": clinician_info.get("Subspecialty", ""),
     "Professional_Specialties": clinician_info.get("specialties", []),
-    "Has_Active_Cases": clinician_info.get("ACTIVE_CASES", 0) > 0,
-    "Active_Case_Count": clinician_info.get("ACTIVE_CASES", 0),
+    "Has_Active_Cases": int(clinician_info.get("ACTIVE_CASES", 0) or 0) > 0,
+    "Active_Case_Count": int(clinician_info.get("ACTIVE_CASES", 0) or 0),
     "Location": {
         "Latitude": clinician_info.get("Latitude"),
         "Longitude": clinician_info.get("Longitude"),
@@ -603,11 +999,24 @@ Scoring:
 
 
 **4. PATIENT PROFILE AND CLINICIAN PROFILE MATCHING - 15%**
-Match patient conditions/needs with clinician subspecialty:
-- Perfect match (patient condition exactly matches clinician specialty): 15 points
-- Good match (related specialty): 10 points
-- Partial match (somewhat related): 5 points
-- No match: 0 points
+This is the most critical and nuanced scoring category. Your goal is to act as an experienced medical professional to identify connections between the patient's stated needs and the clinician's expertise, even if the terms are not identical.
+
+**Instructions:**
+1.  **Analyze Patient Data:** Thoroughly examine all text fields in the patient's record, including `Service_Description`, `PatientProfile`, `Medical_History`, `Diagnosis`, and any other notes. Look for keywords related to diseases, conditions, symptoms, or required treatments.
+2.  **Analyze Clinician Specialties:** Review the clinician's `Professional_Specialties` list.
+3.  **Connect Concepts:** Use your medical knowledge to connect the patient's condition to the clinician's specialties. The connection does not need to be a direct keyword match.
+    -   **Example:** If the patient has "myeloma" (a type of cancer), and the clinician has "Oncologic Clinical Specialist", this is a **PERFECT match (15 points)**.
+    -   **Example:** If a patient has "difficulty walking after a stroke" and the clinician is a "Neurologic Clinical Specialist", this is a **PERFECT match (15 points)**.
+    -   **Example:** If a patient has "post-operative weakness" and the clinician is a "Certified Strength and Conditioning Specialist", this is a **GOOD match (10-12 points)**.
+    -   **Example:** If a patient is elderly and has "frequent falls", and the clinician is a "Geriatric Clinical Specialist", this is a **PERFECT match (15 points)**.
+
+**Scoring Guidelines:**
+-   **Perfect Match (15 points):** The patient's primary condition falls directly within the scope of one of the clinician's core specialties (e.g., cancer -> oncology, stroke -> neurology, heart condition -> cardiovascular).
+-   **Good Match (10-12 points):** The patient's condition is strongly related to a clinician's specialty, or a secondary condition matches a specialty (e.g., general deconditioning -> strength and conditioning specialist).
+-   **Partial Match (5-8 points):** There is a plausible but not direct link between the patient's needs and the clinician's skills.
+-   **No Match (0-3 points):** No discernible connection between the patient's condition and the clinician's listed specialties.
+
+You have the expertise to make these connections. Trust your judgment to find the best clinical fit.
 
 **5. CASE STATUS - 10%**
 - Case Status = "Open issue" or "Pending Assignment": 10 points
@@ -677,7 +1086,10 @@ Match patient conditions/needs with clinician subspecialty:
 - Skills2Care® Certification
 - Trauma-Informed Practice Health Certification (TIPHC)
 
-=== SCORING EXAMPLES ===
+For patient and clinician profile matching , consider any of the subspaciality mentioned above can match the patient condition(his/her illness) and clinician spaciality. Use your advanced medical knowledge to find the best possible match between the patient's condition and the clinician's specialties, even if the keywords are not an exact match.
+
+
+  === SCORING EXAMPLES ===
 Example 1: Previous provider match (30) + all conditions (25) + close distance (20) + perfect specialty match (15) + open case (10) = 100 points
 Example 2: No previous provider (0) + 2 conditions (10) + medium distance (10) + good specialty match (10) + pending case (10) = 40 points
 
@@ -697,28 +1109,151 @@ Calculate scores precisely using the percentage weights above.
 """
     return prompt
 
+def fast_ai_score(candidates: List[Dict[str,Any]],
+                  clinician_info: Dict[str,Any],
+                  active_case_ids_resolved: List[str]) -> List[Dict[str,Any]]:
+    """Fast AI scoring with actual Gemini AI for top candidates"""
+    
+    print(f"🚀 Using FAST AI scoring for {len(candidates)} candidates")
+    start_time = time.time()
+    
+    try:
+        # Step 1: Pre-filter to top 50 candidates using quick rule-based scoring
+        candidates_with_scores = []
+        
+        for candidate in candidates:
+            # Quick rule-based pre-scoring
+            base_score = 50
+            
+            # Previous provider bonus (30 points)
+            if candidate.get("Is_Previous_Provider_Match", False):
+                base_score += 30
+            
+            # Distance bonus (25 points max)
+            distance = candidate.get("Primary_Distance") or candidate.get("DISTANCE_FROM_ACTIVE_CASE")
+            if distance and str(distance).replace('.', '').replace('-', '').isdigit():
+                dist_val = float(distance)
+                if dist_val <= 2:
+                    base_score += 25
+                elif dist_val <= 5:
+                    base_score += 20
+                elif dist_val <= 10:
+                    base_score += 15
+                else:
+                    base_score += 5
+            
+            # Status bonus (10 points)
+            status = str(candidate.get("CASE_STATUS", "")).lower()
+            if "pending" in status or "open" in status:
+                base_score += 10
+            
+            candidate_copy = candidate.copy()
+            candidate_copy["_prescore"] = base_score
+            candidates_with_scores.append(candidate_copy)
+        
+        # Sort by pre-score and take top 50 for AI scoring
+        top_candidates = sorted(candidates_with_scores, key=lambda x: x["_prescore"], reverse=True)[:50]
+        
+        # Step 2: Use actual AI scoring on top 50 candidates
+        print(f"Pre-filtered to top {len(top_candidates)} candidates for AI scoring")
+        ai_scored = ai_score(top_candidates, clinician_info, active_case_ids_resolved)
+        
+        # Step 3: Apply enhanced reasoning to remaining candidates
+        remaining_candidates = candidates_with_scores[50:]
+        for candidate in remaining_candidates:
+            # Enhanced reasoning similar to AI but rule-based
+            reason_bits = []
+            
+            if candidate.get("Is_Previous_Provider_Match", False):
+                reason_bits.append("previous provider match")
+            
+            # Distance reasoning
+            if candidate.get("DISTANCE_FROM_ACTIVE_CASE") is not None:
+                active_case_name = candidate.get("active_case_name", "active case") 
+                distance_info = f"near {active_case_name} (~{candidate['DISTANCE_FROM_ACTIVE_CASE']}mi)"
+                reason_bits.append(distance_info)
+            elif candidate.get("Primary_Distance") is not None:
+                distance_type = candidate.get("Distance_Type_Used", "distance")
+                distance_info = f"{distance_type.replace('_', ' ').lower()} ~{candidate['Primary_Distance']}mi"
+                reason_bits.append(distance_info)
+            
+            reason_bits.append(f"discipline {candidate.get('DISCIPLINE', 'PT')}")
+            
+            if candidate.get("Clinician_Has_Active_Cases"):
+                reason_bits.append("clinician has active cases")
+            
+            candidate["Match_Score"] = candidate["_prescore"]
+            candidate["Reason"] = ", ".join(reason_bits)[:160]
+            candidate.pop("_prescore", None)  # Remove temporary score
+        
+        # Combine AI-scored and rule-based candidates
+        all_scored = ai_scored + remaining_candidates
+        
+        elapsed = time.time() - start_time
+        print(f"⏱️ [FAST SCORING] Completed in {elapsed:.2f} seconds")
+        
+        return all_scored
+        
+    except Exception as e:
+        print(f"❌ Fast AI scoring failed: {str(e)}")
+        # Fallback to enhanced reasoning for all candidates
+        for candidate in candidates:
+            reason_bits = []
+            
+            if candidate.get("Is_Previous_Provider_Match", False):
+                reason_bits.append("previous provider match")
+            
+            if candidate.get("DISTANCE_FROM_ACTIVE_CASE") is not None:
+                active_case_name = candidate.get("active_case_name", "active case")
+                distance_info = f"near {active_case_name} (~{candidate['DISTANCE_FROM_ACTIVE_CASE']}mi)"
+                reason_bits.append(distance_info)
+            elif candidate.get("Primary_Distance") is not None:
+                distance_type = candidate.get("Distance_Type_Used", "distance")
+                distance_info = f"{distance_type.replace('_', ' ').lower()} ~{candidate['Primary_Distance']}mi"
+                reason_bits.append(distance_info)
+            
+            reason_bits.append(f"discipline {candidate.get('DISCIPLINE', 'PT')}")
+            
+            if candidate.get("Clinician_Has_Active_Cases"):
+                reason_bits.append("clinician has active cases")
+            
+            candidate["Match_Score"] = 50
+            candidate["Reason"] = ", ".join(reason_bits)[:160]
+        
+        elapsed = time.time() - start_time
+        print(f"⏱️ [FAST SCORING] Completed with fallback in {elapsed:.2f} seconds")
+        return candidates
+
 def ai_score(candidates: List[Dict[str,Any]],
              clinician_info: Dict[str,Any],
              active_case_ids_resolved: List[str]) -> List[Dict[str,Any]]:
     """Send everything to Gemini for full scoring; return enriched list or raise."""
     
+    ai_start_time = time.time()
+    print(f"⏱️ [TIMING] Starting AI scoring for {len(candidates)} candidates")
+    
     if not init_gemini():
         raise RuntimeError("Gemini initialization failed")
 
     # Process in smaller batches to avoid token limits and ensure all patients are scored
-    batch_size = 5  # Reduced to 5 patients at a time for better AI reliability
+    batch_size = 2  # Reduced to 2 patients at a time for faster processing
     all_scored = []
-    
+     
     for i in range(0, len(candidates), batch_size):
         batch = candidates[i:i + batch_size]
-        print(f"🔄 Processing batch {i//batch_size + 1}: patients {i+1}-{min(i+batch_size, len(candidates))}")
+        batch_start = time.time()
+        print(f"[BATCH] Processing batch {i//batch_size + 1}: patients {i+1}-{min(i+batch_size, len(candidates))}")
         
         try:
             batch_scored = _process_ai_batch(batch, clinician_info, active_case_ids_resolved)
             all_scored.extend(batch_scored)
+            batch_time = time.time() - batch_start
+            print(f"⏱️ [TIMING] Batch {i//batch_size + 1} took: {batch_time:.2f} seconds")
             print(f"✅ Successfully scored {len(batch_scored)} patients in this batch")
         except Exception as e:
-            print(f"❌ Batch {i//batch_size + 1} failed: {str(e)}")
+            batch_time = time.time() - batch_start
+            print(f"⏱️ [TIMING] Failed batch took: {batch_time:.2f} seconds")
+            print(f"[ERROR] Batch {i//batch_size + 1} failed: {str(e)}")
             # Add unscored patients with default scores
             for candidate in batch:
                 enriched = candidate.copy()
@@ -726,6 +1261,8 @@ def ai_score(candidates: List[Dict[str,Any]],
                 enriched["Reason"] = f"AI batch processing failed: {str(e)[:100]}"
                 all_scored.append(enriched)
     
+    total_ai_time = time.time() - ai_start_time
+    print(f"⏱️ [TIMING] Total AI scoring completed in: {total_ai_time:.2f} seconds")
     print(f"🎉 Total AI scoring complete: {len(all_scored)} patients processed")
     return all_scored
 
@@ -753,7 +1290,7 @@ def _process_ai_batch(candidates: List[Dict[str,Any]],
             )
             
             raw = _extract_text_from_gemini_response(resp)
-            print(f"🔍 Attempt {retry_count + 1}: Gemini raw response length: {len(raw) if raw else 0} characters")
+            print(f"[DEBUG] Attempt {retry_count + 1}: Gemini raw response length: {len(raw) if raw else 0} characters")
             
             if not raw:
                 raise ValueError("Empty response from Gemini API")
@@ -827,7 +1364,7 @@ def _process_ai_batch(candidates: List[Dict[str,Any]],
             return out
             
         except Exception as e:
-            print(f"❌ Attempt {retry_count + 1} failed: {str(e)}")
+            print(f"[ERROR] Attempt {retry_count + 1} failed: {str(e)}")
             retry_count += 1
             
             if retry_count >= max_retries:
@@ -859,34 +1396,33 @@ def recommend_patients(clinician_id: str, radius: float = 50.0, top_k: int = 50)
     ai_used = False
     ai_error = None
 
-    # ---------- Load patient data safely ----------
-    try:
-        print("Loading patient data...")
-        _, patients = load_data()  # Still need patients from JSON
-        print(f"Loaded {len(patients)} patients")
-    except Exception as e:
-        print(f"Error loading patient data: {str(e)}")
-        return {"error": f"Failed to load patient data: {e}"}
-
-    # ---------- Fetch clinician from API ----------
+    # ---------- Load data using new API approach ----------
     cid = str(clinician_id).strip()
-    print(f"Fetching clinician data from API for Provider ID: {cid}")
-    
-    # Fetch clinician data from API
-    clinician_info = fetch_clinician_from_api(cid)
-    if not clinician_info:
-        return {"error": f"Clinician with Provider ID '{cid}' not found or API error occurred."}
-    
+    try:
+        print("Loading clinician and patient data from APIs...")
+        clinician_info, patients = load_data(provider_id=cid, radius=radius)
+        print(f"Loaded clinician: {clinician_info.get('Name', 'Unknown')}")
+        print(f"Loaded {len(patients)} patients from proximity cases")
+    except Exception as e:
+        print(f"Error loading data: {str(e)}")
+        return {"error": f"Failed to load data: {e}"}
+
+    if patients.empty:
+        return {"error": "No patients found in proximity"}
+
     print(f"Found clinician: {clinician_info.get('Name', 'Unknown')} ({clinician_info.get('Discipline', 'Unknown')})")
 
-    # Normalize clinician discipline
-    disc_raw = clinician_info.get("Discipline") or clinician_info.get("SPECIALTY") or clinician_info.get("DISCIPLINE") or ""
+    # Normalize clinician discipline - check multiple possible field names
+    disc_raw = (clinician_info.get("DiciplineCode") or     # API has typo "DiciplineCode"
+               clinician_info.get("Discipline") or 
+               clinician_info.get("SPECIALTY") or 
+               clinician_info.get("DISCIPLINE") or "")
     normalized = normalize_clinician_discipline(disc_raw)
     print(f"Clinician discipline: {disc_raw} -> normalized: {normalized}")
     
     if normalized not in {"PT","OT","ST"}:
         return {"error": f"Unsupported clinician discipline '{disc_raw}' (normalized='{normalized}')"}
-    
+
     # Get clinician subspecialty
     subspecialty = clinician_info.get("Subspecialty") or ""
     print(f"Clinician subspecialty: {subspecialty}")
@@ -905,20 +1441,25 @@ def recommend_patients(clinician_id: str, radius: float = 50.0, top_k: int = 50)
         print(f"Trying facility coordinates: LAT={facility_lat}, LON={facility_lon}")
         clinician_coords = _coords_from_cols(facility_lat, facility_lon)
         
-    print(f"📍 Final clinician coordinates: {clinician_coords}")
+    print(f"[LOCATION] Final clinician coordinates: {clinician_coords}")
     
     if not clinician_coords:
-        print("⚠️ WARNING: Clinician has no valid coordinates!")
+        print("[WARNING] Clinician has no valid coordinates!")
         print("   This will cause distance calculations to fail")
         print("   Recommendations will be based on discipline matching only")
-        print(f"   Using large radius (≥500 miles) will include patients despite missing coordinates")
+        print(f"   Using large radius (>=500 miles) will include patients despite missing coordinates")
 
     # ---------- Active case context ----------
     # Since we're using API data, active cases count is in ACTIVE_CASES field
     active_case_ids = []  # For now, we don't have specific active case IDs from API
     active_cases_count = clinician_info.get("ACTIVE_CASES", 0)
     # Map active case IDs -> coordinates if present in patients
-    patient_index = patients.set_index("ID", drop=False)
+    # Check if ID is already the index (from load_data) or if we need to set it
+    if "ID" in patients.columns:
+        patient_index = patients.set_index("ID", drop=False)
+    else:
+        # ID is already the index
+        patient_index = patients.copy()
     active_case_coords: List[Tuple[float, float]] = []
     active_case_ids_resolved: List[str] = []
     for ac in active_case_ids:
@@ -933,6 +1474,17 @@ def recommend_patients(clinician_id: str, radius: float = 50.0, top_k: int = 50)
     matches = patients[patients["DISCIPLINE"] == normalized].copy()
     if matches.empty:
         return {"error": f"No patients found for discipline '{normalized}'"}
+    
+    # ---------- Filter out active cases ----------
+    # Active cases are already assigned to the clinician, so exclude them from recommendations
+    initial_count = len(matches)
+    matches = matches[matches["is_active_case"] != True].copy()
+    active_cases_filtered = initial_count - len(matches)
+    if active_cases_filtered > 0:
+        print(f"Filtered out {active_cases_filtered} active cases (already assigned to clinician)")
+    
+    if matches.empty:
+        return {"error": f"No unassigned patients found for discipline '{normalized}' - all cases are already active"}
 
     # ---------- Build candidate feature rows ----------
     def nearest_active_distance(p_coord: Optional[Tuple[float, float]]) -> Tuple[Optional[float], Optional[str]]:
@@ -950,6 +1502,7 @@ def recommend_patients(clinician_id: str, radius: float = 50.0, top_k: int = 50)
         return best_d, best_id
 
     # Determine if clinician has active cases (using API data)
+    active_cases_count = int(active_cases_count) if active_cases_count else 0
     has_active_cases = active_cases_count > 0
     print(f"Clinician has {active_cases_count} active cases")
     
@@ -992,7 +1545,7 @@ def recommend_patients(clinician_id: str, radius: float = 50.0, top_k: int = 50)
             "ID": str(r.get("ID","")),
             "CASE_ID": r.get("CASE_ID"),
             "CASE_NO": r.get("CASE_NO"),
-            "NAME": (str(r.get("First_Name","")) + " " + str(r.get("Last_Name",""))).strip(),
+            "NAME": f"{str(r.get('Last_Name',''))}, {str(r.get('First_Name',''))}".strip(" ,"),
             "City": r.get("City") or r.get("CITY") or "",
             "State": r.get("State") or r.get("STATE") or "",
             "ZIP": r.get("ZIP") or r.get("Zip") or "",
@@ -1004,6 +1557,8 @@ def recommend_patients(clinician_id: str, radius: float = 50.0, top_k: int = 50)
             "Distance_to_Nearest_Active_Case": d_ac,
             "Primary_Distance": primary_distance,
             "Distance_Type_Used": distance_type,
+            "DISTANCE_FROM_ACTIVE_CASE": r.get("DISTANCE_FROM_ACTIVE_CASE"),  # Preserve API distance
+            "active_case_name": r.get("active_case_name"),  # Preserve active case name for reasoning
             "Clinician_Has_Active_Cases": has_active_cases,
             "Nearest_Active_Case_ID": near_ac_id,
             # Raw dates (as strings) + flags:
@@ -1020,8 +1575,17 @@ def recommend_patients(clinician_id: str, radius: float = 50.0, top_k: int = 50)
             "PatientProfile": r.get("PatientProfile_Normalized", r.get("PatientProfile", [])),
         })
 
+    # ---------- Filter out candidates with empty IDs (causes AI scoring issues) ----------
+    initial_candidate_count = len(candidates)
+    
+    candidates = [c for c in candidates if c.get("ID") and str(c.get("ID")).strip()]
+    filtered_count = initial_candidate_count - len(candidates)
+    if filtered_count > 0:
+        print(f"⚠️ Filtered out {filtered_count} candidates with missing IDs")
+
     # ---------- AI scoring ----------
     scored: List[Dict[str, Any]] = []
+    ai_type = "Unknown"  # Track which AI method was used
     try:
         print("Attempting to use Gemini AI for scoring...")
         
@@ -1034,9 +1598,50 @@ def recommend_patients(clinician_id: str, radius: float = 50.0, top_k: int = 50)
         # Set up timeout for Windows (alternative approach)
         try:
             print(f"Starting AI scoring for {len(candidates)} candidates...")
-            scored = ai_score(candidates, clinician_info, active_case_ids_resolved)
-            ai_used = True
-            print(f"Successfully scored {len(scored)} candidates using Gemini AI")
+            
+            # Add timeout protection for AI scoring
+            import threading
+            import time as time_module
+            
+            ai_result = [None]  # Use list to allow modification from inner function
+            ai_exception = [None]
+            
+            def ai_scoring_worker():
+                try:
+                    # Use full AI scoring for detailed reasoning when candidate count is manageable
+                    if len(candidates) <= 100:  # Increased threshold to get better reasoning for more cases
+                        # Use full AI scoring for detailed reasoning when candidate count is manageable
+                        ai_result[0] = ai_score(candidates, clinician_info, active_case_ids_resolved)
+                        print(f"Successfully scored {len(ai_result[0])} candidates using FULL Gemini AI")
+                    else:
+                        # Use fast AI scoring for large candidate sets
+                        ai_result[0] = fast_ai_score(candidates, clinician_info, active_case_ids_resolved)
+                        print(f"Successfully scored {len(ai_result[0])} candidates using FAST Gemini AI")
+                except Exception as e:
+                    ai_exception[0] = e
+            
+            # Start AI scoring in a separate thread with timeout
+            ai_thread = threading.Thread(target=ai_scoring_worker)
+            ai_thread.daemon = True
+            ai_thread.start()
+            
+            # Wait for up to 60 seconds for AI scoring to complete
+            ai_thread.join(timeout=60)
+            
+            if ai_thread.is_alive():
+                print("⚠️ AI scoring timed out after 60 seconds, using fallback...")
+                raise TimeoutError("AI scoring timed out after 60 seconds")
+            
+            if ai_exception[0]:
+                raise ai_exception[0]
+                
+            if ai_result[0]:
+                scored = ai_result[0]
+                ai_used = True
+                # Determine AI type based on candidate count
+                ai_type = "Full Gemini AI" if len(candidates) <= 100 else "Fast Gemini AI"
+            else:
+                raise RuntimeError("AI scoring returned no results")
         except Exception as ai_exception:
             print(f"AI scoring failed with exception: {str(ai_exception)}")
             raise ai_exception
@@ -1045,10 +1650,62 @@ def recommend_patients(clinician_id: str, radius: float = 50.0, top_k: int = 50)
         ai_error = str(e)
         errors.append(f"AI scoring failed: {ai_error}")
         print(f"AI scoring failed: {ai_error}")
+        print("🔄 Using enhanced fallback reasoning instead of basic scoring...")
         # Log detailed error for debugging
         import traceback
         traceback_str = traceback.format_exc()
         print(f"Detailed error traceback:\n{traceback_str}")
+        
+        # Create enhanced fallback reasoning using the same logic as fast_ai_score
+        scored = []
+        for candidate in candidates:
+            enriched = candidate.copy()
+            
+            # Calculate a reasonable score
+            base_score = 50
+            if candidate.get("Is_Previous_Provider_Match", False):
+                base_score += 30
+            
+            distance = candidate.get("DISTANCE_FROM_ACTIVE_CASE")
+            if distance and str(distance).replace('.', '').isdigit():
+                dist_val = float(distance)
+                if dist_val <= 2:
+                    base_score += 25
+                elif dist_val <= 5:
+                    base_score += 20
+                elif dist_val <= 10:
+                    base_score += 15
+                else:
+                    base_score += 5
+            
+            enriched["Match_Score"] = min(base_score, 100)
+            
+            # Build enhanced reasoning
+            reason_bits = []
+            if candidate.get("Is_Previous_Provider_Match", False):
+                reason_bits.append("previous provider match")
+            
+            # Use the enhanced reasoning logic
+            if candidate.get("DISTANCE_FROM_ACTIVE_CASE") is not None:
+                active_case_name = candidate.get("active_case_name", "active case")
+                distance_info = f"near {active_case_name} (~{candidate['DISTANCE_FROM_ACTIVE_CASE']}mi)"
+                reason_bits.append(distance_info)
+            elif candidate.get("Primary_Distance") is not None:
+                distance_type = candidate.get("Distance_Type_Used", "distance")
+                distance_info = f"{distance_type.replace('_', ' ').lower()} ~{candidate['Primary_Distance']}mi"
+                reason_bits.append(distance_info)
+            elif candidate.get("Distance_to_Clinician") is not None:
+                reason_bits.append(f"distance to clinician ~{candidate['Distance_to_Clinician']}mi")
+            
+            reason_bits.append(f"discipline {candidate.get('DISCIPLINE')}")
+            
+            if candidate.get("Clinician_Has_Active_Cases"):
+                reason_bits.append("clinician has active cases")
+                
+            reason_bits.append("AI fallback scoring")
+            
+            enriched["Reason"] = ", ".join(reason_bits)[:160]
+            scored.append(enriched)
 
     # ---------- Fallback if AI failed or returned nothing ----------
     if not scored:
@@ -1100,6 +1757,10 @@ def recommend_patients(clinician_id: str, radius: float = 50.0, top_k: int = 50)
                 distance_type = c.get("Distance_Type_Used", "distance")
                 distance_info = f"{distance_type.replace('_', ' ').lower()} ~{c['Primary_Distance']}mi"
                 reason_bits.append(distance_info)
+            elif c.get("DISTANCE_FROM_ACTIVE_CASE") is not None:
+                active_case_name = c.get("active_case_name", "active case")
+                distance_info = f"near {active_case_name} (~{c['DISTANCE_FROM_ACTIVE_CASE']}mi)"
+                reason_bits.append(distance_info)
             elif c.get("Distance_to_Clinician") is not None:
                 reason_bits.append(f"distance to clinician ~{c['Distance_to_Clinician']}mi")
             
@@ -1146,26 +1807,29 @@ def recommend_patients(clinician_id: str, radius: float = 50.0, top_k: int = 50)
     within_radius_count = 0
     outside_radius_count = 0
     
-    # Filter candidates by radius - only include patients within specified distance
+    # Filter candidates by radius - use DISTANCE_FROM_ACTIVE_CASE when available
     filtered_by_radius = []
     for candidate in scored:
-        # Get the distance used for primary distance calculation
-        distance_to_check = candidate.get("Primary_Distance")
+        # PRIORITY 1: Use distance from active case (calculated from proximity API active case coordinates)
+        distance_to_check = candidate.get("DISTANCE_FROM_ACTIVE_CASE")
+        distance_source = "DISTANCE_FROM_ACTIVE_CASE"
         
-        # If no primary distance, fallback to direct distance to clinician
+        # PRIORITY 2: If no active case distance, use primary distance
+        if distance_to_check is None:
+            distance_to_check = candidate.get("Primary_Distance")
+            distance_source = "Primary_Distance"
+        
+        # PRIORITY 3: If no primary distance, fallback to direct distance to clinician
         if distance_to_check is None:
             distance_to_check = candidate.get("Distance_to_Clinician")
+            distance_source = "Distance_to_Clinician"
         
         # If still no distance information available
         if distance_to_check is None:
             no_distance_count += 1
-            # IMPORTANT FIX: Include candidates without distance info if radius is large (>500 miles)
-            # This handles cases where clinician coordinates are missing from API
-            if radius >= 500:
-                print(f"🔄 Including candidate {candidate.get('ID')} despite missing distance (large radius: {radius} miles)")
-                filtered_by_radius.append(candidate)
-            else:
-                print(f"⚠️ Skipping candidate {candidate.get('ID')} - no distance information (radius too small: {radius} miles)")
+            # Since proximity API was already called with radius filter, include these patients
+            print(f"[INCLUDE] Including candidate {candidate.get('ID')} - proximity API pre-filtered by radius")
+            filtered_by_radius.append(candidate)
             continue
             
         # Include candidate if within radius
@@ -1174,9 +1838,9 @@ def recommend_patients(clinician_id: str, radius: float = 50.0, top_k: int = 50)
             filtered_by_radius.append(candidate)
         else:
             outside_radius_count += 1
-            print(f"Filtered out patient {candidate.get('NAME', 'Unknown')} (ID: {candidate.get('ID')}) - distance {distance_to_check:.1f} miles > {radius} miles")
+            print(f"Filtered out patient {candidate.get('NAME', 'Unknown')} (ID: {candidate.get('ID')}) - distance {distance_to_check:.1f} miles > {radius} miles (using {distance_source})")
     
-    print(f"📊 Radius filtering results:")
+    print(f"[FILTER] Radius filtering results:")
     print(f"   - Candidates before filtering: {candidates_before_radius}")
     print(f"   - Within radius ({radius} miles): {within_radius_count}")
     print(f"   - Outside radius: {outside_radius_count}")
@@ -1184,12 +1848,12 @@ def recommend_patients(clinician_id: str, radius: float = 50.0, top_k: int = 50)
     print(f"   - Final candidates: {len(filtered_by_radius)}")
     
     if no_distance_count > 0:
-        print(f"💡 Note: {no_distance_count} candidates had missing distance info")
+        print(f"[NOTE] Note: {no_distance_count} candidates had missing distance info")
         if radius >= 500:
             print(f"   ✅ Included them due to large radius ({radius} miles)")
         else:
-            print(f"   ❌ Excluded them due to small radius ({radius} miles)")
-            print(f"   💡 Try using radius ≥ 500 miles to include patients with missing coordinates")
+            print(f"   [EXCLUDED] Excluded them due to small radius ({radius} miles)")
+            print(f"   TIP: Try using radius >= 500 miles to include patients with missing coordinates")
     
     # Take the top results from filtered candidates
     out_recs = filtered_by_radius[:max(1, min(top_k, len(filtered_by_radius)))]
@@ -1235,6 +1899,7 @@ def recommend_patients(clinician_id: str, radius: float = 50.0, top_k: int = 50)
         "ai": {
             "model": GEMINI_MODEL,
             "used": ai_used,
+            "type": ai_type,
             "error": ai_error,
         },
         "processing_time_seconds": round(time.time() - t0, 3),
@@ -1258,7 +1923,7 @@ if __name__ == "__main__":
     print(f"Gemini initialization result: {gemini_ready}")
     
     # Test with a clinician that has active cases
-    test_id = "6053290"  # Dr. Ayesha Malik who has active case 53416034
+    test_id = "6053290"  
     # Specify how many recommendations to return
     test_limit = 10
     
