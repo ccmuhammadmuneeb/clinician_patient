@@ -1974,4 +1974,4 @@ if __name__ == "__main__":
             print(f"- {error}")
     
     print("\nFull output:")
-    print(json.dumps(out, indent=2))
+    print(json.dumps(out, indent=2))  

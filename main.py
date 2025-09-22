@@ -131,7 +131,7 @@ def home():
 
                 if (!radius || radius <= 0) {
                     resultDiv.style.display = "block";
-                    resultDiv.innerHTML = "<p class='error'>⚠️ Please enter a valid radius.</p>";
+                    resultDiv.innerHTML = "<p class='error'>⚠️ Please enter a Valid radius.</p>";
                     return;
                 }
 
@@ -139,14 +139,20 @@ def home():
                 resultDiv.innerHTML = "<div class='loading'><div class='spinner'></div><p>Fetching recommendations within radius...</p></div>";
 
                 try {
-                    const response = await fetch(`/recommendations/${providerId}?radius=${radius}`);
+                    // Get the base URL from current location
+                    const baseUrl = window.location.origin + window.location.pathname.replace(/\\/$/, '');
+                    const apiUrl = `${baseUrl}/recommendations/${providerId}?radius=${radius}`;
+                    console.log('Making request to:', apiUrl);
+                    
+                    const response = await fetch(apiUrl);
                     let data;
                     const contentType = response.headers.get("content-type");
                     if (contentType && contentType.includes("application/json")) {
                         data = await response.json();
                     } else {
                         const text = await response.text();
-                        data = { detail: `Server returned non-JSON response: ${text.substring(0, 100)}...` };
+                        console.error('Non-JSON response:', text);
+                        data = { detail: `Server returned non-JSON response:\\n${response.status} ${response.statusText}\\n${text.substring(0, 200)}...` };
                     }
                     
                     if (!response.ok) {
