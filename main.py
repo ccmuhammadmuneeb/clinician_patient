@@ -110,7 +110,7 @@ def home():
             <input type="text" id="provider_id" placeholder="e.g. 6053290">
             
             <label for="radius">Maximum Distance (miles)</label>
-            <input type="number" id="radius" placeholder="e.g. 25" value="25" min="1" max="2000" step="0.1">
+            <input type="number" id="radius" placeholder="e.g. 5" value="5" min="1" max="2000" step="0.1">
             
             <button onclick="getRecommendations()">Get Recommendations</button>
 
@@ -120,7 +120,7 @@ def home():
         <script>
             async function getRecommendations() {
                 const providerId = document.getElementById("provider_id").value.trim();
-                const radius = document.getElementById("radius").value.trim() || 25;
+                const radius = document.getElementById("radius").value.trim() || 5;
                 const resultDiv = document.getElementById("result");
 
                 if (!providerId) {
@@ -172,7 +172,7 @@ def home():
 
 
 @app.get("/test/{provider_id}")
-async def test_recommendations(provider_id: str, radius: float = 50.0):
+async def test_recommendations(provider_id: str, radius: float = 5.0):
     """
     Test endpoint to validate priority rules implementation with radius filtering
     """
@@ -230,13 +230,13 @@ async def test_recommendations(provider_id: str, radius: float = 50.0):
 
 @app.get("/recommend/{provider_id}")
 @app.get("/recommendations/{provider_id}")
-async def get_recommendations(provider_id: str, radius: float = 50.0):
+async def get_recommendations(provider_id: str, radius: float = 5.0):
     """
     Get patient recommendations for a clinician within a specified radius
     
     Args:
         provider_id: The FOX_PROVIDER_ID of the clinician to recommend patients for
-        radius: Maximum distance in miles to include patients (default: 50.0)
+        radius: Maximum distance in miles to include patients (default: 5.0)
     """
     try:
         print(f"Recommendation endpoint called with provider_id: {provider_id}, radius: {radius}")
@@ -263,7 +263,7 @@ async def get_recommendations(provider_id: str, radius: float = 50.0):
 if __name__ == "__main__":
     import uvicorn
     print("🚀 Starting AI Patient Recommendation Server...")
-    print("📍 Server will be available at: http://localhost:8008")
+    print("📍 Server will be available at: http://localhost:8018")
     print("🔧 Press Ctrl+C to stop the server")
     print()
-    uvicorn.run(app, host="0.0.0.0", port=8008)
+    uvicorn.run(app, host="0.0.0.0", port=8018)
