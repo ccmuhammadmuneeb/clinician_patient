@@ -2006,11 +2006,21 @@ def recommend_patients(clinician_id: str, radius: float = 5.0, top_k: int = 5) -
     # ---------- Active case context ----------
     # Since we're using API data, active cases count is in ACTIVE_CASES field
     active_cases_count = clinician_info.get("ACTIVE_CASES", 0)
-    has_active_cases = int(active_cases_count) > 0
+    
+    # Safely convert active_cases_count to integer, handling empty strings and other non-numeric values
+    try:
+        # Handle empty strings, None, and convert to int
+        active_cases_count_int = int(active_cases_count) if active_cases_count and str(active_cases_count).strip() else 0
+        has_active_cases = active_cases_count_int > 0
+    except (ValueError, TypeError):
+        print(f"Warning: Invalid active cases count value: '{active_cases_count}', defaulting to 0")
+        active_cases_count_int = 0
+        has_active_cases = False
     
     # Extract active case coordinates from proximity API response
     active_case_coords: List[Tuple[float, float]] = []
     active_case_ids_resolved: List[str] = []
+    active_case_names_map: Dict[str, str] = {}  # Map of case_id -> name
     
     # We need to extract active case coordinates from the raw API response
     # This data is available in the proximity API response in ClinicianActiveCase objects
@@ -2026,12 +2036,22 @@ def recommend_patients(clinician_id: str, radius: float = 5.0, top_k: int = 5) -
             lat = active_case.get("CASE_LAT")
             lon = active_case.get("CASE_LON")
             
+            # Create active case name using Last Name, First Name format
+            first_name = active_case.get("First_Name", "")
+            last_name = active_case.get("Last_Name", "")
+            case_name = f"{last_name}, {first_name}".strip(" ,")
+            if not case_name:
+                case_name = f"Active Case {case_id}"
+                
+            # Store the name in the map
+            active_case_names_map[case_id] = case_name
+            
             if lat is not None and lon is not None:
                 try:
                     coords = (float(lat), float(lon))
                     active_case_coords.append(coords)
                     active_case_ids_resolved.append(case_id)
-                    print(f"Added active case {case_id} with coordinates: {coords}")
+                    print(f"Added active case {case_id} ({case_name}) with coordinates: {coords}")
                 except (ValueError, TypeError):
                     pass
     
@@ -2041,6 +2061,13 @@ def recommend_patients(clinician_id: str, radius: float = 5.0, top_k: int = 5) -
             # This is a direct reference to coordinates stored during transform
             coords = row["active_case_coords"]
             case_id = str(row.get("active_case_id", "unknown"))
+            
+            # Get active case name if available
+            active_case_name = row.get("active_case_name")
+            if active_case_name:
+                active_case_names_map[case_id] = active_case_name
+                print(f"Added active case name mapping: {case_id} -> {active_case_name}")
+            
             if coords and isinstance(coords, tuple) and len(coords) == 2:
                 active_case_coords.append(coords)
                 active_case_ids_resolved.append(case_id)
@@ -2065,11 +2092,12 @@ def recommend_patients(clinician_id: str, radius: float = 5.0, top_k: int = 5) -
         return {"error": f"No unassigned patients found for discipline '{normalized}' - all cases are already active"}
 
     # ---------- Build candidate feature rows ----------
-    def nearest_active_distance(p_coord: Optional[Tuple[float, float]]) -> Tuple[Optional[float], Optional[str]]:
+    def nearest_active_distance(p_coord: Optional[Tuple[float, float]]) -> Tuple[Optional[float], Optional[str], Optional[str]]:
         if not p_coord or not active_case_coords:
-            return None, None
+            return None, None, None
         best_d = None
         best_id = None
+        best_name = None
         for idx, ac_coord in enumerate(active_case_coords):
             d = calculate_distance(p_coord, ac_coord)
             if d is None:
@@ -2077,12 +2105,14 @@ def recommend_patients(clinician_id: str, radius: float = 5.0, top_k: int = 5) -
             if best_d is None or d < best_d:
                 best_d = d
                 best_id = active_case_ids_resolved[idx]
-        return best_d, best_id
+                # Look up name in the mapping
+                if best_id in active_case_names_map:
+                    best_name = active_case_names_map[best_id]
+                
+        return best_d, best_id, best_name
 
-    # Determine if clinician has active cases (using API data)
-    active_cases_count = int(active_cases_count) if active_cases_count else 0
-    has_active_cases = active_cases_count > 0
-    print(f"Clinician has {active_cases_count} active cases")
+    # We've already determined if clinician has active cases at the top
+    print(f"Clinician has {active_cases_count_int} active cases")
     
     candidates: List[Dict[str, Any]] = []
     for _, row in matches.iterrows():
@@ -2090,7 +2120,7 @@ def recommend_patients(clinician_id: str, radius: float = 5.0, top_k: int = 5) -
         # Coordinates
         p_coord = _coords_from_cols(r.get("CASE_LAT"), r.get("CASE_LON"))
         d_clin = calculate_distance(clinician_coords, p_coord) if clinician_coords and p_coord else None
-        d_ac, near_ac_id = nearest_active_distance(p_coord)
+        d_ac, near_ac_id, near_ac_name = nearest_active_distance(p_coord)
 
         # Implement priority distance calculation rules
         primary_distance = None
@@ -2113,7 +2143,7 @@ def recommend_patients(clinician_id: str, radius: float = 5.0, top_k: int = 5) -
             
             # Debug info for distance issues
             if has_active_cases and d_ac is None:
-                print(f"WARNING: Patient {r.get('ID', '')} has no valid distance to active cases despite clinician having {active_cases_count} active cases")
+                print(f"WARNING: Patient {r.get('ID', '')} has no valid distance to active cases despite clinician having {active_cases_count_int} active cases")
                 if len(active_case_coords) == 0:
                     print(f"  - No active case coordinates collected - missing active cases in API response?")
                 elif p_coord is None:
@@ -2144,7 +2174,6 @@ def recommend_patients(clinician_id: str, radius: float = 5.0, top_k: int = 5) -
             "State": r.get("State") or r.get("STATE") or "",
             "ZIP": r.get("ZIP") or r.get("Zip") or "",
             "DISCIPLINE": r.get("DISCIPLINE"),
-            "Subspecialty": subspecialty,  # Add clinician subspecialty from API
             "Case_Status": r.get("CASE_STATUS") or "",
             "Previous_Provider": prev_provider,
             "Is_Previous_Provider_Match": is_previous_provider_match,
@@ -2152,9 +2181,8 @@ def recommend_patients(clinician_id: str, radius: float = 5.0, top_k: int = 5) -
             "Distance_to_Nearest_Active_Case": d_ac,
             "Primary_Distance": primary_distance,
             "Distance_Type_Used": distance_type,
-            "Distance_Source": distance_source,
             "DISTANCE_FROM_ACTIVE_CASE": d_ac,  # Use calculated distance to active case
-            "active_case_name": None,  # No specific active case provided in this function
+            "active_case_name": near_ac_name or r.get("active_case_name"),  # Use nearest active case name or row data
             "Clinician_Has_Active_Cases": has_active_cases,
             "Nearest_Active_Case_ID": near_ac_id,
             # Raw dates (as strings) + flags:
@@ -2462,7 +2490,7 @@ def recommend_patients(clinician_id: str, radius: float = 5.0, top_k: int = 5) -
             "Subspecialty": clinician_info.get("Subspecialty", ""),
             "Specialties": clinician_info.get("specialties", []),
             "Has_Active_Cases": has_active_cases,
-            "Active_Cases_Count": active_cases_count,
+            "Active_Cases_Count": active_cases_count_int,
             "Location": {
                 "Latitude": clinician_info.get("Latitude"),
                 "Longitude": clinician_info.get("Longitude"),
